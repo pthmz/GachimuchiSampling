@@ -1,3 +1,4 @@
 ## 哲♂学采样
 Format: WAV
-Freq: 48000hz
+
+Sample Rate: 48000hz
