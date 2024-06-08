@@ -1,4 +1,4 @@
 ## 哲♂学采样
-Format: WAV
+Format: `WAV`,`SF2`
 
 Sample Rate: 48000hz
