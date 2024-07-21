@@ -1,5 +1,7 @@
 ## 哲♂学采样
-Language: Chinese
+Language of File Name: Chinese
+
+Language of Voice: English
 
 Format: `WAV`,`SF2`
 
