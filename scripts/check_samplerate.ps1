@@ -54,15 +54,43 @@ foreach ($f in $wavs) {
             continue
         }
 
-        # WAV 格式：RIFF header (12) + fmt chunk
-        # sample rate 位于偏移 24，4 字节小端序
-        $rate = [BitConverter]::ToUInt32($bytes, 24)
+        # WAV 格式：RIFF(12) 后跟若干 chunk，每个 chunk = 4 字节 ID + 4 字节 size + 数据
+        # 采样率在 fmt chunk 内偏移 8（fmt 数据起始 + 8），4 字节小端序
+        # 不能用固定偏移 24 —— 前面可能插入 JUNK/fact/other chunk（FL Studio Edison、宿主导出常见）
+        $rate = 0
+        $note = ""
+        $pos = 12  # 跳过 "RIFF"+size+"WAVE"
+        $foundFmt = $false
+        while ($pos + 8 -le $bytes.Length) {
+            $chunkId = [System.Text.Encoding]::ASCII.GetString($bytes, $pos, 4)
+            $chunkSize = [BitConverter]::ToUInt32($bytes, $pos + 4)
+            if ($chunkId -eq "fmt ") {
+                if ($pos + 8 + 4 -le $bytes.Length) {
+                    # fmt 数据起始在 pos+8，采样率在其 +4（跳过 format(2) + channels(2))
+                    $rate = [BitConverter]::ToUInt32($bytes, $pos + 8 + 4)
+                }
+                $foundFmt = $true
+                break
+            }
+            # chunk 数据按偶数对齐，往前推到下一个 chunk
+            $advance = 8 + $chunkSize
+            if ($chunkSize % 2 -ne 0) { $advance++ }
+            $pos += $advance
+        }
+
+        if (-not $foundFmt) {
+            $bad += [PSCustomObject]@{
+                File = $f.FullName
+                Rate = "N/A"
+                Note = "未找到 fmt chunk，可能不是标准 WAV"
+            }
+            continue
+        }
 
         if ($rate -eq $TargetRate) {
             $ok++
         }
         else {
-            $note = if ($rate -eq 0) { "无法读取采样率，可能是 WAV 变体格式" } else { "" }
             $bad += [PSCustomObject]@{
                 File = $f.FullName
                 Rate = "$rate Hz"
