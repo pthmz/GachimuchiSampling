@@ -1,17 +1,24 @@
 <#
 .SYNOPSIS
-    检查仓库中所有 WAV 文件的采样率，报告不符合 48kHz 的文件。
+    检查 WAV 文件采样率，报告不符合 48kHz 的文件。支持全仓扫或只查指定文件。
 
 .DESCRIPTION
-    遍历指定目录（默认当前目录）下所有 .wav 文件，读取 WAV 文件头中的采样率，
+    默认递归扫 -Path 下所有 .wav；指定 -Files 则只查这些文件（不再递归扫目录）。
+    读取 WAV 文件头中的采样率（遍历 chunks 找 fmt，正确处理 JUNK/fact 等变体），
     与目标采样率（默认 48000 Hz）对比，输出统计报告。
 
     默认为人类可读报告（带颜色 banner）。
     开 -AsAgent 输出紧凑机器可读行；开 -Json 直接吐 JSON。
-    退出码（agent 用）：0 = 全合规；1 = 有不符合；2 = 路径下无 wav。
+    退出码（agent 用）：0 = 全合规；1 = 有不符合；2 = 没查到任何 wav。
 
 .PARAMETER Path
-    要检查的根目录，默认为脚本所在目录。
+    要检查的根目录，默认当前目录。仅 -Files 未指定时才用（递归扫）。
+
+.PARAMETER Files
+    只查这些 WAV 文件，不再递归扫目录。接受字符串数组：
+        -Files "a.wav","b.wav"
+        -Files (Get-ChildItem -Filter *.wav)
+    路径相对/绝对都行，输出时一律转绝对路径。
 
 .PARAMETER TargetRate
     目标采样率，默认为 48000。
@@ -37,6 +44,10 @@
     ./scripts/check_samplerate.ps1 -Path "D:\Samples" -TargetRate 44100 -Csv "report.csv"
 
 .EXAMPLE
+    # 只查指定文件
+    pwsh scripts/check_samplerate.ps1 -Files "a.wav","b.wav"
+
+.EXAMPLE
     # agent 调用
     pwsh scripts/check_samplerate.ps1 -AsAgent
     pwsh scripts/check_samplerate.ps1 -Json | ConvertFrom-Json
@@ -44,6 +55,7 @@
 
 param(
     [string]$Path = (Get-Location),
+    [string[]]$Files = @(),
     [int]$TargetRate = 48000,
     [string]$Csv = "",
     [switch]$AsAgent,
@@ -54,7 +66,30 @@ $ErrorActionPreference = "Stop"
 $agentMode = $AsAgent -or $Json
 
 # ---------- 收集 WAV 文件 ----------
-$wavs = Get-ChildItem -Path $Path -Recurse -Filter *.wav
+# -Files 可 能以数组传入，也可能因命令行解析成单个 "a,b" 字符串，这里统一拆平
+$flatFiles = @()
+foreach ($f in $Files) {
+    if ($null -eq $f) { continue }
+    # 含逗号且不是绝对路径里的逗号时，按逗号拆（容错命令行传参）
+    $flatFiles += ($f -split ',')
+}
+$flatFiles = $flatFiles | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+
+if ($flatFiles.Count -gt 0) {
+    # 只查指定文件：Resolve-Path 转绝对路径并校验存在
+    $wavs = $flatFiles | ForEach-Object {
+        try {
+            $rp = Resolve-Path -LiteralPath $_
+            [PSCustomObject]@{ FullName = $rp.Path }
+        } catch {
+            [PSCustomObject]@{ FullName = $_ ; _Missing = $true }
+        }
+    }
+} else {
+    $wavs = Get-ChildItem -Path $Path -Recurse -Filter *.wav | ForEach-Object {
+        [PSCustomObject]@{ FullName = $_.FullName }
+    }
+}
 if ($wavs.Count -eq 0) {
     if ($Json) { Write-Output '{"ok":0,"bad":0,"total":0,"target":' + $TargetRate + ',"files":[]}' }
     elseif ($AsAgent) { Write-Output "RESULT ok=0 bad=0 total=0 target=$TargetRate" }
@@ -67,6 +102,15 @@ $ok = 0
 $bad = @()
 
 foreach ($f in $wavs) {
+    # -Files 指定但文件不存在的：直接记 bad，跳过读字节
+    if ($f._Missing) {
+        $bad += [PSCustomObject]@{
+            File = $f.FullName
+            Rate = "MISSING"
+            Note = "文件不存在"
+        }
+        continue
+    }
     try {
         $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
         if ($bytes.Length -lt 44) {
