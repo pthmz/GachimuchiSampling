@@ -6,6 +6,10 @@
     遍历指定目录（默认当前目录）下所有 .wav 文件，读取 WAV 文件头中的采样率，
     与目标采样率（默认 48000 Hz）对比，输出统计报告。
 
+    默认为人类可读报告（带颜色 banner）。
+    开 -AsAgent 输出紧凑机器可读行；开 -Json 直接吐 JSON。
+    退出码（agent 用）：0 = 全合规；1 = 有不符合；2 = 路径下无 wav。
+
 .PARAMETER Path
     要检查的根目录，默认为脚本所在目录。
 
@@ -15,26 +19,47 @@
 .PARAMETER Csv
     可选：将不符合的文件列表导出为 CSV 文件路径。
 
+.PARAMETER AsAgent
+    agent 模式：不输出 banner / 颜色，输出紧凑单行机器可读格式：
+        RESULT ok=<n> bad=<n> total=<n> target=<rate>
+        BAD <rate> <abs_path> [<note>]        （每个不符合文件一行）
+    所有路径一律绝对路径。
+
+.PARAMETER Json
+    agent 模式：直接吐 JSON 到 stdout，无 banner / 颜色：
+        { "ok": n, "bad": n, "total": n, "target": rate,
+          "files": [ { "file": abs, "rate": n, "note": str } ] }
+
 .EXAMPLE
     ./scripts/check_samplerate.ps1
 
 .EXAMPLE
     ./scripts/check_samplerate.ps1 -Path "D:\Samples" -TargetRate 44100 -Csv "report.csv"
+
+.EXAMPLE
+    # agent 调用
+    pwsh scripts/check_samplerate.ps1 -AsAgent
+    pwsh scripts/check_samplerate.ps1 -Json | ConvertFrom-Json
 #>
 
 param(
     [string]$Path = (Get-Location),
     [int]$TargetRate = 48000,
-    [string]$Csv = ""
+    [string]$Csv = "",
+    [switch]$AsAgent,
+    [switch]$Json
 )
 
 $ErrorActionPreference = "Stop"
+$agentMode = $AsAgent -or $Json
 
 # ---------- 收集 WAV 文件 ----------
 $wavs = Get-ChildItem -Path $Path -Recurse -Filter *.wav
 if ($wavs.Count -eq 0) {
-    Write-Host "未找到 .wav 文件。" -ForegroundColor Yellow
-    exit 0
+    if ($Json) { Write-Output '{"ok":0,"bad":0,"total":0,"target":' + $TargetRate + ',"files":[]}' }
+    elseif ($AsAgent) { Write-Output "RESULT ok=0 bad=0 total=0 target=$TargetRate" }
+    else { Write-Host "未找到 .wav 文件。" -ForegroundColor Yellow }
+    exit 2
 }
 
 # ---------- 逐文件检查 ----------
@@ -108,26 +133,50 @@ foreach ($f in $wavs) {
 }
 
 # ---------- 输出报告 ----------
-Write-Host "=== 采样率检查报告 ===" -ForegroundColor Cyan
-Write-Host "检查路径 : $Path"
-Write-Host "目标采样率: $TargetRate Hz"
-Write-Host "总检查文件: $($wavs.Count)"
-Write-Host "符合要求  : $ok"
-Write-Host "不符合    : $($bad.Count)"
-
-if ($bad.Count -gt 0) {
-    Write-Host "`n--- 不符合的文件 ---" -ForegroundColor Yellow
+if ($Json) {
+    # JSON 输出：{ ok, bad, total, target, files:[{file,rate,note}] }
+    $filesJson = $bad | ForEach-Object {
+        $fEsc = $_.File -replace '\\', '\\' -replace '"', '\"'
+        $rEsc = $_.Rate -replace '"', '\"'
+        $nEsc = $_.Note -replace '\\', '\\' -replace '"', '\"'
+        '{"file":"' + $fEsc + '","rate":"' + $rEsc + '","note":"' + $nEsc + '"}'
+    }
+    $filesStr = if ($filesJson.Count -gt 0) { $filesJson -join ',' } else { '' }
+    Write-Output ('{"ok":' + $ok + ',"bad":' + $bad.Count + ',"total":' + $wavs.Count + ',"target":' + $TargetRate + ',"files":[' + $filesStr + ']}')
+}
+elseif ($AsAgent) {
+    # 紧凑机器行：RESULT + 每个不符合一行 BAD
+    Write-Output ("RESULT ok=$ok bad=$($bad.Count) total=$($wavs.Count) target=$TargetRate")
     $bad | ForEach-Object {
-        Write-Host ("  {0,-8} | {1}" -f $_.Rate, $_.File)
-        if ($_.Note) { Write-Host ("          {0}" -f $_.Note) }
+        $line = "BAD " + $_.Rate + " " + $_.File
+        if ($_.Note) { $line += " " + $_.Note }
+        Write-Output $line
+    }
+}
+else {
+    # 人类可读 banner
+    Write-Host "=== 采样率检查报告 ===" -ForegroundColor Cyan
+    Write-Host "检查路径 : $Path"
+    Write-Host "目标采样率: $TargetRate Hz"
+    Write-Host "总检查文件: $($wavs.Count)"
+    Write-Host "符合要求  : $ok"
+    Write-Host "不符合    : $($bad.Count)"
+
+    if ($bad.Count -gt 0) {
+        Write-Host "`n--- 不符合的文件 ---" -ForegroundColor Yellow
+        $bad | ForEach-Object {
+            Write-Host ("  {0,-8} | {1}" -f $_.Rate, $_.File)
+            if ($_.Note) { Write-Host ("          {0}" -f $_.Note) }
+        }
     }
 }
 
 # ---------- 导出 CSV ----------
 if ($Csv -and $bad.Count -gt 0) {
     $bad | Export-Csv -Path $Csv -NoTypeInformation -Encoding UTF8
-    Write-Host "已导出 CSV: $Csv" -ForegroundColor Green
+    if (-not $agentMode) { Write-Host "已导出 CSV: $Csv" -ForegroundColor Green }
 }
 
-# 返回退出码（方便 CI 使用）
+# 退出码：0 全合规；1 有不符合；2 无 wav（agent 用）
+if ($wavs.Count -eq 0) { exit 2 }
 exit ($bad.Count -gt 0 ? 1 : 0)
